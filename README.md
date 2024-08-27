@@ -1,4 +1,4 @@
-A Prediction‐Traversal Approach for Compressing Scientific Data on Unstructured Meshes with Bounded Error
+An Error-Bounded Lossy Compression Method with Bit-Adaptive Quantization for Particle Data
 =====
 (C) 2024 by Congrong Ren. See LICENSE in top-level directory.
 
