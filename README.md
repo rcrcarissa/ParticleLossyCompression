@@ -8,24 +8,20 @@ An Error-Bounded Lossy Compression Method with Bit-Adaptive Quantization for Par
 
 ## Testing Examples
 
-Please use the executable 'comp' and 'decomp' command to do the compression/decompression. Parameters are listed below.
+Please use the executable 'comp_decomp' command to do the compression & decompression. Parameters are listed below.
 
 Parameter | Explanation | Options
 --- | --- | --- 
 -ds | Specify the dataset name. | N/A
 -dim | Specify the dimension. | 2 or 3
 -reb | Specify the relative error bound. | N/A
+-r | Specify the maximum number of particles in a leaf node. | N/A
 -f/-d | Specify the precision. | -f or -d
 
-For example, one can use
+For example:
 ```
-$ comp -ds HACC -dim 3 -reb 1e-9 -d
+$ comp_decomp -ds Nyx -dim 3 -reb 1e-9 -r 50 -d
 ```
-for compression, and
-```
-$ decomp -ds HACC -dim 3 -reb 1e-9 -d
-```
-for decompression.
 
 ## Citation
 
