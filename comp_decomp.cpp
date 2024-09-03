@@ -8,10 +8,9 @@
 #include <unordered_set>
 #include <limits>
 #include <ctime>
+#include <zstd.h>
 #include "findNearestPoint.cpp"
-#include "SZ3/api/sz.hpp"
-#include "SZ3/encoder/HuffmanEncoder.hpp"
-#include "SZ3/lossless/Lossless_zstd.hpp"
+#include "huffman.cpp"
 
 
 void printUsage() {
@@ -20,11 +19,12 @@ void printUsage() {
     std::cout << "  -dim   Specify the dimension" << std::endl;
     std::cout << "  -f   Specify the precision. -f for float and -d for double" << std::endl;
     std::cout << "  -reb   Specify the relative error bound." << std::endl;
+    std::cout << "  -r   Specify the max number of particles allowed in a leaf node." << std::endl;
 }
 
-std::tuple<char *, size_t, bool, double> Parsing(int argc, char *argv[]) {
-    std::tuple<char *, size_t, bool, double> error_return_value = std::make_tuple(nullptr, 0, false, 0);
-    if (argc < 8) {
+std::tuple<char *, size_t, bool, double, double> Parsing(int argc, char *argv[]) {
+    std::tuple<char *, size_t, bool, double, double> error_return_value = std::make_tuple(nullptr, 0, false, 0, 0);
+    if (argc < 10) {
         printUsage();
         return error_return_value;
     }
@@ -33,6 +33,7 @@ std::tuple<char *, size_t, bool, double> Parsing(int argc, char *argv[]) {
     size_t dim;
     bool isSinglePrecision;
     double reb;
+    double r;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -61,13 +62,21 @@ std::tuple<char *, size_t, bool, double> Parsing(int argc, char *argv[]) {
                 printUsage();
                 return error_return_value;
             }
+        } else if (arg == "-r") {
+            if (i + 1 < argc) {
+                r = std::atof(argv[++i]);
+            } else {
+                std::cerr << "Error: -r requires a value." << std::endl;
+                printUsage();
+                return error_return_value;
+            }
         } else if (arg == "-f") {
             isSinglePrecision = true;
         } else if (arg == "-d") {
             isSinglePrecision = false;
         }
     }
-    return std::make_tuple(dataset, dim, isSinglePrecision, reb);
+    return std::make_tuple(dataset, dim, isSinglePrecision, reb, r);
 }
 
 typedef struct KDNode {
@@ -323,10 +332,11 @@ bool is_point_in_box(const std::vector<double> &pt, const std::vector<std::vecto
 void
 one_box_compression(const std::vector<std::vector<double>> &pts, const std::vector<int> &pts_in_box_id,
                     const std::vector<int> &num_bits, const int center_id, const double xi,
-                    std::vector<double> &data2compressed, std::vector<double> &decompressed_data) {
+                    std::vector<int> &quantization_code, std::vector<double> &lossless_data,
+                    std::vector<double> &decompressed_data) {
     std::vector<double> center = pts[center_id];
-    data2compressed.insert(data2compressed.end(), center.begin(), center.end());
-    data2compressed.insert(data2compressed.end(), num_bits.begin(), num_bits.end());
+    lossless_data.insert(lossless_data.end(), center.begin(), center.end());
+    quantization_code.insert(quantization_code.end(), num_bits.begin(), num_bits.end());
     decompressed_data.insert(decompressed_data.end(), center.begin(), center.end());
     for (int i = 0; i < pts_in_box_id.size(); i++) {
         std::vector<double> pt = pts[pts_in_box_id[i]];
@@ -347,11 +357,65 @@ one_box_compression(const std::vector<std::vector<double>> &pts, const std::vect
                 std::cout << "Error! Points inside box is unpredictable." << std::endl;
             else {
                 decompressed_data.push_back(center[d] + (code - std::pow(2, num_bits[d] - 1)) * 2 * xi);
-                data2compressed.push_back(code);
+                quantization_code.push_back(code);
             }
         }
     }
-    data2compressed.push_back(std::numeric_limits<double>::infinity());
+    quantization_code.push_back(std::numeric_limits<double>::infinity());
+}
+
+std::vector<char> zstdCompress(const std::string &input) {
+    size_t compressedSize = ZSTD_compressBound(input.size());  // Get maximum compressed size
+    std::vector<char> compressedData(compressedSize);
+
+    size_t actualCompressedSize = ZSTD_compress(compressedData.data(), compressedSize, input.data(), input.size(),
+                                                1);  // Compression level 1
+
+    if (ZSTD_isError(actualCompressedSize)) {
+        std::cerr << "ZSTD compression error: " << ZSTD_getErrorName(actualCompressedSize) << std::endl;
+        return {};
+    }
+
+    compressedData.resize(actualCompressedSize);
+    return compressedData;
+}
+
+std::string zstdDecompress(const std::vector<char> &compressedData, size_t originalSize) {
+    std::vector<char> decompressedData(originalSize);
+
+    size_t decompressedSize = ZSTD_decompress(decompressedData.data(), originalSize, compressedData.data(),
+                                              compressedData.size());
+
+    if (ZSTD_isError(decompressedSize)) {
+        std::cerr << "ZSTD decompression error: " << ZSTD_getErrorName(decompressedSize) << std::endl;
+        return {};
+    }
+
+    return std::string(decompressedData.begin(), decompressedData.begin() + decompressedSize);
+}
+
+
+double getMaxColumnRange(const std::vector<std::vector<double>> &matrix) {
+    size_t numCols = matrix[0].size();
+    double maxRange = 0;
+
+    for (size_t col = 0; col < numCols; ++col) {
+        double minVal = std::numeric_limits<double>::max();
+        double maxVal = std::numeric_limits<double>::min();
+
+        for (const auto &row: matrix) {
+            if (row.size() > col) {
+                double value = row[col];
+                if (value < minVal) minVal = value;
+                if (value > maxVal) maxVal = value;
+            }
+        }
+
+        double range = maxVal - minVal;
+        if (range > maxRange) maxRange = range;
+    }
+
+    return maxRange;
 }
 
 void box_compression(const std::vector<std::vector<double>> &pts, double xi, int r) {
@@ -374,7 +438,8 @@ void box_compression(const std::vector<std::vector<double>> &pts, double xi, int
     kd_tree.initialize(&kd_tree.root, reinterpret_cast<std::vector<double> (*)(std::vector<double>,
                                                                                std::vector<double>)>(get_union_of_two_bounding_boxes));
     std::vector<std::vector<int>> nums_bits;
-    std::vector<double> data2compressed;
+    std::vector<int> quantization_codes;
+    std::vector<double> lossless_data;
     std::vector<double> decompressed_data;
     while (n_remaining_pts > 0) {
         int box_idx = std::distance(total_n_bits.begin(), std::min_element(total_n_bits.begin(), total_n_bits.end()));
@@ -440,47 +505,49 @@ void box_compression(const std::vector<std::vector<double>> &pts, double xi, int
             }
         }
         leaf_to_remove->attrs.clear();
-        one_box_compression(kd_tree.pts, pts_to_remove_idx, num_bits, leaf_to_remove->center_idx, xi, data2compressed,
-                            decompressed_data);
+        one_box_compression(kd_tree.pts, pts_to_remove_idx, num_bits, leaf_to_remove->center_idx, xi,
+                            quantization_codes, lossless_data, decompressed_data);
         n_remaining_pts -= pts_to_remove_idx.size() + 1;
         removed_pts_idx.insert(pts_to_remove_idx.begin(), pts_to_remove_idx.end());
         removed_pts_idx.insert(leaf_to_remove->center_idx);
     }
-}
+    std::string huffman = huffmanCompress(quantization_codes);
+    std::vector<char> compressedData = zstdCompress(huffman);
 
-double getMaxColumnRange(const std::vector<std::vector<double>> &matrix) {
-    size_t numCols = matrix[0].size();
-    double maxRange = 0;
-
-    for (size_t col = 0; col < numCols; ++col) {
-        double minVal = std::numeric_limits<double>::max();
-        double maxVal = std::numeric_limits<double>::min();
-
-        for (const auto &row: matrix) {
-            if (row.size() > col) {
-                double value = row[col];
-                if (value < minVal) minVal = value;
-                if (value > maxVal) maxVal = value;
-            }
-        }
-
-        double range = maxVal - minVal;
-        if (range > maxRange) maxRange = range;
+    // print results
+    int original_size = pts.size() * 3 * sizeof(double);
+    int compressed_size = compressedData.size() + lossless_data.size() * sizeof(double);
+    std::cout << "Compression ratio = " << original_size / compressed_size << std::endl;
+    std::vector<double> original_data;
+    for (const auto &row: kd_tree.pts) {
+        original_data.insert(original_data.end(), row.begin(), row.end());
     }
 
-    return maxRange;
+    std::vector<double> tmp1(original_data.size());
+    std::transform(original_data.begin(), original_data.end(), decompressed_data.begin(), tmp1.begin(),
+                   [](double a, double b) { return a - b; });
+    std::vector<double> tmp2(original_data.size());
+    std::transform(tmp1.begin(), tmp1.end(), tmp2.begin(),
+                   [](double val) { return std::pow(val, 2); });
+    double mse = std::accumulate(tmp2.begin(), tmp2.end(), 0) / original_data.size();
+    double rmse = std::sqrt(mse);
+    double range = getMaxColumnRange(kd_tree.pts);
+    double nrmse = rmse / range;
+    double psnr = 20 * std::log10(range) - 10 * std::log10(mse);
+    std::cout << "MSE = " << mse << std::endl;
+    std::cout << "RMSE = " << rmse << std::endl;
+    std::cout << "NRMSE = " << nrmse << std::endl;
+    std::cout << "PSNR = " << psnr << std::endl;
 }
 
+
 int main(int argc, char *argv[]) {
-
-    auto [dataset, dim, isSinglePrecision, xi_pct] = Parsing(argc, argv);
-
+    auto [dataset, dim, isSinglePrecision, xi_pct, r] = Parsing(argc, argv);
     std::vector<std::vector<double> > points = readBinaryFile(strcat(dataset, ".dat"), dim);
     double range = getMaxColumnRange(points);
     clock_t start_time = clock();
-    box_compression(points, xi_pct * range, 50);
+    box_compression(points, xi_pct * range, r);
     clock_t end_time = clock();
     double duration = double(end_time - start_time) / CLOCKS_PER_SEC;
     std::cout << duration << std::endl;
-//    box_compression(points, 0.001, 5);
 }
