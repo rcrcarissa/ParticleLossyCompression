@@ -8,10 +8,12 @@
 #include <unordered_set>
 #include <limits>
 #include <ctime>
+#include <omp.h>
 #include <zstd.h>
 #include "findNearestPoint.cpp"
 #include "huffman.cpp"
 
+#pragma omp parallel for
 
 void printUsage() {
     std::cout << "Usage: <cpp_filename> -ds <dataset_name> -dim <dimension> -f" << std::endl;
